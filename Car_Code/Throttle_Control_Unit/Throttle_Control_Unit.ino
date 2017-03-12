@@ -50,6 +50,7 @@ Metro updateTimer = Metro(500); // Read in values from pins
 Metro implausibilityTimer = Metro(50); // Used for throttle error check
 Metro throttleTimer = Metro(500); // Used for sending commands to Motor Controller
 Metro tractiveTimeOut = Metro(5000); // Used to check timeout of tractive system activation
+Metro timer_motor_controller_send = Metro(50);
 
 // setup code
 void setup() {
@@ -163,6 +164,7 @@ void loop() {
             // NOTE: there is no timeout for the above state change
             if (brakePedalActive) {
                 // TODO: check Start button on dashboard - code has not been written yet
+                // TODO There is no checking for if brakePedalActive
 
                 // Sending enable torque message
                 set_state(TCU_STATE_ENABLING_INVERTER);
@@ -195,6 +197,20 @@ void loop() {
             break;
         case TCU_STATE_READY_TO_DRIVE:
             break;
+    }
+
+    /*
+     * Send a message to the Motor Controller over CAN when vehicle is not ready to drive
+     */
+    if (state < TCU_STATE_READY_TO_DRIVE && timer_motor_controller_send.check()) {
+      msg.id = ID_MC_COMMAND_MESSAGE;
+      msg.len = 8;
+      if (state < TCU_STATE_ENABLING_INVERTER) {
+        generate_MC_message(msg.buf, 0, true, false);
+      } else if (state < TCU_STATE_READY_TO_DRIVE) {
+        generate_MC_message(msg.buf, 0, true, true);
+      }
+      CAN.write(msg);
     }
 }
 
@@ -236,40 +252,63 @@ bool checkDeactivateTractiveSystem() {
     }
 }
 
+void generate_MC_message(unsigned char* message, int torque, boolean backwards, boolean enable) {
+  message[0] = torque & 0xFF;
+  message[1] = torque >> 8;
+  message[2] = 0;
+  message[3] = 0;
+  message[4] = char(backwards);
+  message[5] = char(enable);
+  message[6] = 0;
+  message[7] = 0;
+}
+
 int sendCANUpdate(){
-    // short shortThrottle1 = (short) voltageThrottlePedal1 * 100;
-    // short shortThrottle2 = (short) voltageThrottlePedal2 * 100;
-    // short shortBrake = (short) voltageBrakePedal * 100;
-    // short shortTemp = (short) thermTemp * 100;
-    //
-    // msg.id = ID_TCU_STATUS;
-    // msg.len = 8;
-    //
-    // memcpy(&msg.buf[0], &shortThrottle1, sizeof(short));
-    // memcpy(&msg.buf[2], &shortThrottle2, sizeof(short));
-    // memcpy(&msg.buf[4], &shortBrake, sizeof(short));
-    // memcpy(&msg.buf[6], &shortTemp, sizeof(short));
-    //
-    // int temp1 = CAN.write(msg);
+    int bufferAvailable = 0;
 
-    byte statuses = state;
-
-    if(throttleImplausibility) statuses |= (1<<4);
-    if(throttleCurve) statuses |= (1<<5);
-    if(brakeImplausibility) statuses |= (1<<6);
-    if(brakePedalActive) statuses |= (1<<7);
-
+    /* --------- Sending TCU_status --------- */
+    TCU_status curTCU_status = TCU_status();
     msg.id = ID_TCU_STATUS;
-    msg.len = 1;
-    msg.buf[0] = statuses;
+    msg.len = 8;
 
-    int temp2 = CAN.write(msg);
+    curTCU_status.set_throttle_implausibility(throttleImplausibility);
+    curTCU_status.set_throttle_curve(throttleCurve);
+    curTCU_status.set_brake_implausibility(brakeImplausibility);
+    curTCU_status.set_brake_pedal_active(brakePedalActive);
 
-    return temp2; // used for error checking?
+    curTCU_status.write(msg.buf);
+    bufferAvailable += CAN.write(msg);
 
+    /* --------- Sending TCU_readings ------- */
+    TCU_readings curTCU_readings = TCU_readings();
+    msg.id = ID_TCU_READINGS;
+    msg.len = 8;
+
+    short shortThrottle1 = (short) voltageThrottlePedal1 * 100;
+    short shortThrottle2 = (short) voltageThrottlePedal2 * 100;
+    short shortBrake = (short) voltageBrakePedal * 100;
+    short shortTemp = (short) thermTemp * 100;
+
+    curTCU_readings.set_throttle_value_1(shortThrottle1);
+    curTCU_readings.set_throttle_value_2(shortThrottle2);
+    curTCU_readings.set_brake_value(shortBrake);
+    curTCU_readings.set_temperature(shortTemp);
+
+    curTCU_readings.write(msg.buf);
+    bufferAvailable += CAN.write(msg);
+
+    return bufferAvailable; // used for error checking
 }
 
 void set_state(uint8_t new_state) {
+    // Use if there are special state change cases
+    Serial.println("");
+    Serial.print("Changing state of TCU from: ");
+    Serial.print("\tSTATE ");
+    Serial.print(state);
+    Serial.print("\tto STATE ");
+    Serial.print(new_state);
+    Serial.println();
     if (state == new_state) {
         return; // don't do anything if same state
     } else if (new_state == TCU_STATE_WAITING_SHUTDOWN_CIRCUIT_INITIALIZED) {
